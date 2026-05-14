@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Helldivers 2 SDK: Community Edition",
-    "version": (3, 8, 0),
+    "version": (3, 8, 1),
     "blender": (4, 0, 0),
     "category": "Import-Export",
 }
@@ -71,6 +71,7 @@ from .stingray.texture import StingrayTexture
 from .stingray.particle import StingrayParticles
 from .stingray.state_machine import StingrayStateMachine
 from .stingray.bones import LoadBoneHashes, StingrayBones
+from .stingray.ik_skeleton import StingrayIkSkeleton
 from .stingray.composite_unit import StingrayCompositeMesh
 from .stingray.unit import CreateModel, GetObjectsMeshData, StingrayMeshFile
 from .utils.slim import is_slim_version, load_package, get_package_toc, slim_init
@@ -602,6 +603,7 @@ class TocEntry:
         if self.TypeID == ParticleID: callback = LoadStingrayDump
         if self.TypeID == CompositeUnitID: callback = LoadStingrayCompositeUnit
         if self.TypeID == BoneID: callback = LoadStingrayBones
+        if self.TypeID == IkSkeletonID: callback = LoadStingrayIkSkeleton
         if self.TypeID == AnimationID: callback = LoadStingrayAnimation
         if self.TypeID == StateMachineID: callback = LoadStingrayStateMachine
         if callback == None: callback = LoadStingrayDump
@@ -624,6 +626,7 @@ class TocEntry:
         if self.TypeID == ParticleID: callback = SaveStingrayDump
         if self.TypeID == AnimationID: callback = SaveStingrayAnimation
         if self.TypeID == BoneID: callback = SaveStingrayBones
+        if self.TypeID == IkSkeletonID: callback = SaveStingrayIkSkeleton
         if self.TypeID == StateMachineID: callback = SaveStingrayStateMachine
         if callback == None: callback = SaveStingrayDump
 
@@ -635,6 +638,34 @@ class TocEntry:
                 data = callback(self, self.FileID, self.TocData, self.GpuData, self.StreamData, self.LoadedData)
             self.SetData(data[0], data[1], data[2])
         return True
+
+# Helper: Save a unit by archive ID (use inside Blender)
+def SaveUnitByID(unit_id:int):
+    """Load unit by archive ID and save it, including ik_skeleton repack and patch inclusion.
+    Run inside Blender where the addon is loaded: from . import SaveUnitByID; SaveUnitByID(123)
+    """
+    Entry = Global_TocManager.GetEntryByLoadArchive(int(unit_id), UnitID)
+    if Entry is None:
+        PrettyPrint(f"Could not find unit entry for ID: {unit_id}", 'error')
+        return False
+    # Ensure entry is in patch
+    if not Global_TocManager.IsInPatch(Entry):
+        Entry = Global_TocManager.AddEntryToPatchID(Entry, int(unit_id))
+    # Load to populate LoadedData
+    if not Entry.IsLoaded:
+        Entry.Load(True, False)
+    # Call Save on entry (this triggers SaveStingrayUnit and will save ik_skeleton if modified)
+    try:
+        BlenderOpts = bpy.context.scene.Hd2ToolPanelSettings.get_settings_dict()
+    except Exception:
+        BlenderOpts = None
+    try:
+        Entry.Save(BlenderOpts=BlenderOpts)
+    except Exception as e:
+        PrettyPrint(f"Failed to save unit {unit_id}: {e}", 'error')
+        return False
+    PrettyPrint(f"Saved unit {unit_id}")
+    return True
 
 class TocFileType:
     def __init__(self, ID=0, NumFiles=0):
@@ -962,7 +993,7 @@ class TocManager():
                 executor.shutdown()
         return toc
     
-    def GetEntryByLoadArchive(self, FileID: int, TypeID: int) -> TocEntry:
+    def GetEntryByLoadArchive(self, FileID: int, TypeID: int):
         return self.GetEntry(FileID, TypeID, SearchAll=True, IgnorePatch=True)
     
     def ArchiveNotEmpty(self, toc):
@@ -1000,7 +1031,7 @@ class TocManager():
 
     #______________________#
     # ---- Entry Code ---- #
-    def GetEntry(self, FileID, TypeID, SearchAll=False, IgnorePatch=False) -> TocEntry:
+    def GetEntry(self, FileID, TypeID, SearchAll=False, IgnorePatch=False):
         # Check Active Patch
         if not IgnorePatch and self.ActivePatch != None:
             Entry = self.ActivePatch.GetEntry(FileID, TypeID)
@@ -1028,7 +1059,7 @@ class TocManager():
         Entry = self.GetEntry(FileID, TypeID, SearchAll)
         if Entry != None: Entry.Load(Reload)
 
-    def Save(self, FileID, TypeID) -> bool:
+    def Save(self, FileID, TypeID):
         Entry = self.GetEntry(FileID, TypeID)
         if Entry == None:
             PrettyPrint(f"Failed to save entry {FileID}")
@@ -1106,7 +1137,7 @@ class TocManager():
             raise Exception("No patch exists, please create one first")
         self.ActivePatch.AddEntry(Entry)
         
-    def AddEntryToPatchID(self, Entry, dest_id) -> TocEntry:
+    def AddEntryToPatchID(self, Entry, dest_id):
         if self.ActivePatch == None:
             raise Exception("No patch exists, please create one first")
             
@@ -1117,7 +1148,7 @@ class TocManager():
             return PatchEntry
         return None
 
-    def AddEntryToPatch(self, FileID, TypeID) -> TocEntry:
+    def AddEntryToPatch(self, FileID, TypeID):
         if self.ActivePatch == None:
             raise Exception("No patch exists, please create one first")
 
@@ -1135,16 +1166,16 @@ class TocManager():
             self.ActivePatch.RemoveEntry(FileID, TypeID)
         return None
 
-    def GetPatchEntry(self, Entry) -> TocEntry:
+    def GetPatchEntry(self, Entry):
         if self.ActivePatch != None:
             return self.ActivePatch.GetEntry(Entry.FileID, Entry.TypeID)
         return None
-    def GetPatchEntry_B(self, FileID, TypeID) -> TocEntry:
+    def GetPatchEntry_B(self, FileID, TypeID):
         if self.ActivePatch != None:
             return self.ActivePatch.GetEntry(FileID, TypeID)
         return None
 
-    def IsInPatch(self, Entry) -> bool:
+    def IsInPatch(self, Entry):
         if self.ActivePatch != None:
             PatchEntry = self.ActivePatch.GetEntry(Entry.FileID, Entry.TypeID)
             if PatchEntry != None: return True
@@ -1681,6 +1712,16 @@ def LoadStingrayBones(ID, TocData, GpuData, StreamData, Reload, MakeBlendObject)
     return StingrayBonesData
     
 def SaveStingrayBones(self, ID, TocData, GpuData, StreamData, LoadedData):
+    f = MemoryStream(TocData, IOMode="write") # Load in original TocData before overwriting it
+    LoadedData.Serialize(f)
+    return [f.Data, b"", b""]
+
+def LoadStingrayIkSkeleton(ID, TocData, GpuData, StreamData, Reload, MakeBlendObject):
+    IkSkeletonData = StingrayIkSkeleton()
+    IkSkeletonData.Serialize(MemoryStream(TocData))
+    return IkSkeletonData
+
+def SaveStingrayIkSkeleton(self, ID, TocData, GpuData, StreamData, LoadedData):
     f = MemoryStream(TocData, IOMode="write") # Load in original TocData before overwriting it
     LoadedData.Serialize(f)
     return [f.Data, b"", b""]
@@ -2371,35 +2412,6 @@ class StateMachineBlendMaskWeightOperator(Operator):
     
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
-    
-class StateMachineAnimationIDOperator(Operator):
-    bl_label = "Animation ID"
-    bl_idname = "helldiver2.animation_id"
-    bl_description = "Animation ID"
-
-    object_id: bpy.props.StringProperty()
-    animation_id: bpy.props.StringProperty()
-    animation_index: bpy.props.IntProperty()
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "animation_id")
-        
-    def execute(self, context):
-        Entry = Global_TocManager.GetEntry(self.object_id, StateMachineID)
-        if Entry:
-            if self.animation_index < len(Entry.LoadedData.animation_ids):
-                Entry.LoadedData.animation_ids[self.animation_index] = int(self.animation_id)
-            else:
-                self.report({'ERROR'}, f"Animation index {self.animation_index} out of range")
-                return {'CANCELLED'}
-        else:
-            self.report({'ERROR'}, f"Could not find entry for ID: {self.object_id}")
-            return {'CANCELLED'}
-        return {'FINISHED'}
-    
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
         
 class StateMachineSaveOperator(Operator):
     bl_label = "Save State Machine"
@@ -2855,19 +2867,6 @@ class SaveStingrayUnitOperator(Operator):
         if SwapID and SwapID.isnumeric() and SwapID != ID:
             dest_id = int(SwapID)
         Entry = Global_TocManager.AddEntryToPatchID(Entry, dest_id)
-        stateMachineID = BonesID = None
-        for modifier in object.modifiers:
-            if modifier.type == "ARMATURE":
-                armature_obj = modifier.object
-                stateMachineID = armature_obj["StateMachineID"]
-                BonesID = armature_obj["BonesID"]
-                PrettyPrint(f"Found StateMachineID: {stateMachineID} and BonesID: {BonesID}")
-        if stateMachineID != None:
-            PrettyPrint(f"Set StateMachineRef: {stateMachineID}")
-            Entry.LoadedData.StateMachineRef = int(stateMachineID)
-        if BonesID != None:
-            PrettyPrint(f"Set BonesRef: {BonesID}")
-            Entry.LoadedData.BonesRef = int(BonesID)
         model = GetObjectsMeshData(Global_TocManager, Global_BoneNames)
         BlenderOpts = bpy.context.scene.Hd2ToolPanelSettings.get_settings_dict()
         if Entry is None:
@@ -2942,15 +2941,7 @@ class BatchSaveStingrayUnitOperator(Operator):
                         return {'CANCELLED'}
                 except:
                     self.report({'INFO'}, f"{object.name} has no HD2 Swap ID. Skipping Swap.")
-                stateMachineID = BonesID = None
-                for modifier in object.modifiers:
-                    PrettyPrint(f"Modifiers: {modifier.type}")
-                    if modifier.type == "ARMATURE":
-                        armature_obj = modifier.object
-                        stateMachineID = armature_obj["StateMachineID"]
-                        BonesID = armature_obj["BonesID"]
-                        PrettyPrint(f"Found StateMachineID: {stateMachineID} and BonesID: {BonesID}")
-                IDitem = [ID, SwapID, stateMachineID, BonesID]
+                IDitem = [ID, SwapID]
                 if IDitem not in IDs:
                     IDs.append(IDitem)
             except KeyError:
@@ -2992,13 +2983,7 @@ class BatchSaveStingrayUnitOperator(Operator):
                 dest_id = int(SwapID)
             Entry = Global_TocManager.AddEntryToPatchID(Entry, dest_id)
             entries.append(Entry)
-        if IDitem[2] != None: 
-            PrettyPrint(f"Set StateMachineRef: {IDitem[2]}")
-            Entry.LoadedData.StateMachineRef = int(IDitem[2])
-        if IDitem[3] != None:
-            PrettyPrint(f"Set BonesRef: {IDitem[3]}")
-            Entry.LoadedData.BonesRef = int(IDitem[3])
-        MeshData = GetObjectsMeshData(Global_TocManager, Global_BoneNames)
+        MeshData = GetObjectsMeshData(Global_TocManager, Global_BoneNames)    
         for i, IDitem in enumerate(IDs):
             ID = IDitem[0]
             SwapID = IDitem[1]
@@ -4757,25 +4742,7 @@ class HellDivers2ToolsPanel(Panel):
                         op.bone_weight = weight
                         op.blend_mask_index = i
                 i -= 1
-            
-            row = layout.row()
-            if f"animation_ids" not in Global_Foldouts:
-                Global_Foldouts[f"animation_ids"] = False
-            animation_ids_show = Global_Foldouts[f"animation_ids"]
-            fold_icon = "DOWNARROW_HLT" if animation_ids_show else "RIGHTARROW"
-            row.operator("helldiver2.collapse_section", text=f"Animations", icon=fold_icon, emboss=False).type = f"animation_ids"
-            
-            if animation_ids_show:
-                for k, animation_id in enumerate(state_machine.animation_ids):
-                    row = layout.row()
-                    split = row.split()
-                    text = GetFriendlyNameFromID(animation_id)
-                    split.label(text=text)
-                    op = split.operator("helldiver2.animation_id", text=f"{animation_id}")
-                    op.object_id = str(state_machine_entry.FileID)
-                    op.animation_index = k
-                    op.animation_id = str(animation_id)
-                
+                    
             # draw the values for the bone blend masks for each layer
     
     def draw(self, context):
@@ -4991,7 +4958,7 @@ class HellDivers2ToolsPanel(Panel):
             # Get Type Icon
             type_icon = 'FILE'
             showExtras = scene.Hd2ToolPanelSettings.ShowExtras
-            if not showExtras and Type.TypeID not in [AnimationID, ParticleID, UnitID, TexID, MaterialID, StateMachineID]:
+            if not showExtras and Type.TypeID not in [AnimationID, ParticleID, UnitID, TexID, MaterialID, StateMachineID, IkSkeletonID, BoneID]:
                 continue
             try:
                 type_icon = Global_IconDict[Type.TypeID]
@@ -5464,7 +5431,6 @@ classes = (
     AddLightOperator,
     ViewChangelogOperator,
     LoadPlayerAvatarOperator,
-    StateMachineAnimationIDOperator,
 )
 
 Global_TocManager = TocManager()

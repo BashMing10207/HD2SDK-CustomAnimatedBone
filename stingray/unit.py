@@ -6,12 +6,12 @@ import bpy
 import random
 import bmesh
 
-from .bones import StingrayBones
-from .state_machine import StingrayStateMachine
-
 from ..utils.memoryStream import MemoryStream, MakeTenBitUnsigned, TenBitUnsigned
 from ..utils.logger import PrettyPrint
 from ..utils.hashing import murmur32_hash
+from .animation import AnimationBoneInitialState
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from ..utils.constants import *
 
@@ -1742,10 +1742,13 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
     bone_entry = Global_TocManager.GetEntry(stingray_mesh_entry.BonesRef, BoneID, IgnorePatch=False, SearchAll=True)
     modified_bone_entry = False
     modified_state_machine = False
+    modified_ik_skeleton = False
     bone_names = []
     bone_data = None
     state_machine_data = None
+    ik_skeleton_data = None
     state_machine_entry = Global_TocManager.GetEntry(stingray_mesh_entry.StateMachineRef, StateMachineID, IgnorePatch=False, SearchAll=True)
+    ik_skeleton_entry = None
     if bone_entry is None:
         PrettyPrint("This unit does not have any animated bone data, unable to edit bone animated state", "warn")
     else:
@@ -1764,6 +1767,19 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
             if not state_machine_entry.IsLoaded:
                 state_machine_entry.Load()
             state_machine_data = state_machine_entry.LoadedData
+
+    # Attempt to load ik_skeleton (shares same reference id as bones but different type id)
+    try:
+        ik_skeleton_entry = Global_TocManager.GetEntry(stingray_mesh_entry.BonesRef, IkSkeletonID, IgnorePatch=False, SearchAll=True)
+        if ik_skeleton_entry is not None:
+            if not Global_TocManager.IsInPatch(ik_skeleton_entry):
+                ik_skeleton_entry = Global_TocManager.AddEntryToPatch(ik_skeleton_entry.FileID, IkSkeletonID)
+            if ik_skeleton_entry and not ik_skeleton_entry.IsLoaded:
+                ik_skeleton_entry.Load()
+                ik_skeleton_data = ik_skeleton_entry.LoadedData
+    except Exception:
+        ik_skeleton_entry = None
+        ik_skeleton_data = None
 
         
     # get armature object
@@ -1788,14 +1804,24 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
             old_bones = sorted(bone_data.BoneHashes)
             new_bones = sorted([(int(bone.name) if bone.name.isdigit() else murmur32_hash(bone.name.encode("utf-8"))) for bone in armature_obj.data.edit_bones if bone.get('Animated')])
             if old_bones != new_bones:
-                PrettyPrint("Changes made to animated bones, clearing saved animation data")
+                PrettyPrint("Changes made to animated bones, clearing saved animation data concurrently")
                 if state_machine_data:
-                    for animation in state_machine_data.animation_ids:
-                        animation_data = Global_TocManager.GetEntry(animation, AnimationID, IgnorePatch=False, SearchAll=True)
+                    def _clear_animation_entry(animation_id):
+                        animation_data = Global_TocManager.GetEntry(animation_id, AnimationID, IgnorePatch=False, SearchAll=True)
                         if Global_TocManager.IsInPatch(animation_data):
-                            Global_TocManager.RemoveEntryFromPatch(animation, AnimationID)
-                        Global_TocManager.AddEntryToPatch(animation, AnimationID)
-        
+                            Global_TocManager.RemoveEntryFromPatch(animation_id, AnimationID)
+                        Global_TocManager.AddEntryToPatch(animation_id, AnimationID)
+
+                    with ThreadPoolExecutor() as executor:
+                        futures = [executor.submit(_clear_animation_entry, anim) for anim in state_machine_data.animation_ids]
+                        for f in as_completed(futures):
+                            try:
+                                f.result()
+                            except Exception as e:
+                                PrettyPrint(f"Failed to clear animation {anim}: {e}", "warn")
+
+        # Collect bone changes first to avoid loading/saving animations for every bone        bones_to_add = []
+        bones_to_remove = []
         for bone in armature_obj.data.edit_bones:
             try:
                 name_hash = int(bone.name)
@@ -1819,6 +1845,7 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
             try:
                 animated = bone['Animated']
                 if animated and name_hash not in bone_data.BoneHashes:
+                    # record addition, apply to animations later in batch
                     bone_data.BoneHashes.append(name_hash)
                     bone_data.Names.append(bone.name)
                     bone_data.NumNames += 1
@@ -1827,14 +1854,9 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
                     for blend_mask in state_machine_data.blend_masks:
                         blend_mask.bone_count += 1
                         blend_mask.bone_weights.append(0.0)
-                    if state_machine_data:
-                        for animation in state_machine_data.animation_ids:
-                            animation_data = Global_TocManager.GetEntry(animation, AnimationID, IgnorePatch=False, SearchAll=True)
-                            if not animation_data.IsLoaded:
-                                animation_data.Load(False, False)
-                            animation_data.LoadedData.add_bone(bone)
-                            Global_TocManager.Save(animation, AnimationID)
+                    bones_to_add.append(bone)
                 if not animated and name_hash in bone_data.BoneHashes:
+                    # record removal index, apply to animations later in batch
                     list_index = bone_data.BoneHashes.index(name_hash)
                     bone_data.BoneHashes.pop(list_index)
                     bone_data.Names.pop(list_index)
@@ -1847,17 +1869,8 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
                             blend_mask.bone_count -= 1
                         except IndexError: # happens when removing a custom animated bone
                             pass
-                    if state_machine_data:
-                        for animation in state_machine_data.animation_ids:
-                            animation_data = Global_TocManager.GetEntry(animation, AnimationID, IgnorePatch=False, SearchAll=True)
-                            if not animation_data.IsLoaded:
-                                animation_data.Load(False, False)
-                            try:
-                                animation_data.LoadedData.remove_bone(list_index)
-                            except IndexError: # happens when removing a custom animated bone
-                                pass
-                            Global_TocManager.Save(animation, AnimationID)
-                    else:
+                    bones_to_remove.append(list_index)
+                    if not state_machine_data:
                         raise Exception("No state machine property on armature, unable to automatically remove bone data from animations; please set a valid StateMachineID property.")
             except (KeyError, AttributeError) as e:
                 print(e)
@@ -1935,6 +1948,94 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
                 except ValueError:
                     PrettyPrint(f"Failed to parent bone: {bone.name}.", 'warn')
                     
+        # Apply collected bone changes to animations in batch (load/save per animation once)
+        if state_machine_data and (len(bones_to_add) > 0 or len(bones_to_remove) > 0):
+            for animation in state_machine_data.animation_ids:
+                try:
+                    animation_data = Global_TocManager.GetEntry(animation, AnimationID, IgnorePatch=False, SearchAll=True)
+                    if not animation_data.IsLoaded:
+                        animation_data.Load(False, False)
+                    anim_loaded = animation_data.LoadedData
+                    # removals: apply in reverse index order to keep indices valid
+                    # removals: apply in reverse index order to keep indices valid (nosave)
+                    if len(bones_to_remove) > 0:
+                        for rem_idx in sorted(bones_to_remove, reverse=True):
+                            try:
+                                anim_loaded.remove_bone_index_nosave(rem_idx)
+                            except Exception:
+                                pass
+                    # additions: compute initial state in main thread and append without serializing
+                    if len(bones_to_add) > 0:
+                        # Build payloads (pure data) for worker
+                        payloads = []
+                        for bone in bones_to_add:
+                            bm = bone.matrix
+                            parent_m = bone.parent.matrix if bone.parent else None
+                            bm_flat = [bm[i][j] for i in range(4) for j in range(4)]
+                            parent_flat = None
+                            if parent_m:
+                                parent_flat = [parent_m[i][j] for i in range(4) for j in range(4)]
+                            payloads.append({'matrix': bm_flat, 'parent_matrix': parent_flat, 'is_additive': anim_loaded.is_additive_animation})
+
+                        results = None
+                        # Use external CLI worker to avoid child processes importing the add-on package
+                        import json, sys, tempfile, subprocess, pathlib
+                        tmpdir = tempfile.mkdtemp(prefix="hd2_anim_")
+                        in_paths = []
+                        out_paths = []
+                        for idx, p in enumerate(payloads):
+                            in_path = pathlib.Path(tmpdir) / f"payload_{idx}.json"
+                            out_path = pathlib.Path(tmpdir) / f"result_{idx}.json"
+                            with open(in_path, 'w') as f: json.dump(p, f)
+                            in_paths.append(str(in_path))
+                            out_paths.append(str(out_path))
+
+                        workers = min(len(payloads), max(1, (os.cpu_count() or 1)))
+                        procs = []
+                        # locate CLI worker relative to this file (addon root)
+                        addon_root = pathlib.Path(__file__).resolve().parents[1]
+                        script_path = addon_root / 'hd2_anim_worker_cli.py'
+                        if not script_path.exists():
+                            # fallback to sys.path[0]
+                            script_path = pathlib.Path(sys.path[0]) / 'hd2_anim_worker_cli.py'
+                        for in_p, out_p in zip(in_paths, out_paths):
+                            cmd = [sys.executable, str(script_path), in_p, out_p]
+                            proc = subprocess.Popen(cmd)
+                            procs.append(proc)
+                        # wait
+                        for proc in procs:
+                            proc.wait()
+
+                        results = []
+                        for out_p in out_paths:
+                            try:
+                                with open(out_p, 'r') as f:
+                                    results.append(json.load(f))
+                            except Exception:
+                                results.append(None)
+
+                        # apply results
+                        for res in results:
+                            try:
+                                initial_state = AnimationBoneInitialState()
+                                initial_state.compress_position = 0
+                                initial_state.compress_rotation = 0
+                                initial_state.compress_scale = 0
+                                initial_state.position = res['position']
+                                initial_state.rotation = res['rotation']
+                                initial_state.scale = res['scale']
+                                anim_loaded.add_bone_state(initial_state)
+                            except Exception:
+                                pass
+                    # finalize once per animation
+                    try:
+                        anim_loaded.finalize_bone_changes()
+                    except Exception:
+                        # fallback: save normally
+                        Global_TocManager.Save(animation, AnimationID)
+                except Exception as e:
+                    PrettyPrint(f"Failed to update animation {animation}: {e}", "warn")
+
         armature_obj.hide_set(was_hidden)
         for obj in prev_objs:
             obj.select_set(True)
@@ -1946,6 +2047,25 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
         
     if modified_state_machine and state_machine_entry:
         state_machine_entry.Save()
+
+    # detect ik_skeleton modifications from Blender Text blocks
+    if ik_skeleton_data and ik_skeleton_entry:
+        text_name = f"ik_skeleton_{stingray_mesh_entry.BonesRef}.xml"
+        if text_name in bpy.data.texts:
+            text_block = bpy.data.texts[text_name]
+            new_xml = text_block.as_string().encode('utf-8')
+            if new_xml != ik_skeleton_data.Xml:
+                ik_skeleton_data.Xml = new_xml
+                ik_skeleton_data.IsXml = True
+                ik_skeleton_entry.IsModified = True
+                modified_ik_skeleton = True
+
+    # save ik_skeleton if present (use same trigger as bone modifications, or if modified explicitly)
+    if ik_skeleton_entry and (modified_bone_entry or modified_ik_skeleton or ik_skeleton_entry.IsModified):
+        try:
+            ik_skeleton_entry.Save()
+        except Exception as e:
+            PrettyPrint(f"Failed to save ik_skeleton entry: {e}", "warn")
     
     # get lights
     if armature_obj is not None:
@@ -2194,7 +2314,7 @@ def NameFromMesh(mesh, id, customization_info, bone_names, use_sufix=True):
 
     return name
 
-def CreateModel(stingray_unit: StingrayMeshFile, id: int, Global_BoneNames: dict, bones_entry: StingrayBones, state_machine_entry: StingrayStateMachine):
+def CreateModel(stingray_unit, id, Global_BoneNames, bones_entry, state_machine_entry):
     model, customization_info, bone_names, transform_info, bone_info, lights = stingray_unit.RawMeshes, stingray_unit.CustomizationInfo, stingray_unit.BoneNames, stingray_unit.TransformInfo, stingray_unit.BoneInfoArray, stingray_unit.LightList
     imported_lights = False
     if len(model) < 1: return

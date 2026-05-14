@@ -1,0 +1,72 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v7.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v7.0": {
+      "HKLib.CLI/1.0.0": {
+        "dependencies": {
+          "HKLib.Serialization": "1.0.0"
+        },
+        "runtime": {
+          "HKLib.CLI.dll": {}
+        }
+      },
+      "HKLib/1.0.0": {
+        "runtime": {
+          "HKLib.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "HKLib.Reflection/1.0.0": {
+        "dependencies": {
+          "HKLib": "1.0.0"
+        },
+        "runtime": {
+          "HKLib.Reflection.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "HKLib.Serialization/1.0.0": {
+        "dependencies": {
+          "HKLib": "1.0.0",
+          "HKLib.Reflection": "1.0.0"
+        },
+        "runtime": {
+          "HKLib.Serialization.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "HKLib.CLI/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "HKLib/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "HKLib.Reflection/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "HKLib.Serialization/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

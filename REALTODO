@@ -1,0 +1,37 @@
+블렌더(Blender) Python 애드온 프로젝트입니다.
+현재 개발 중인 'Helldivers 2 SDK: Community Edition' 애드온에서 3가지 문제가 발생했습니다. 제공된 코드(`__init__.py`, `stingray/unit.py`, `stingray/ik_skeleton.py`)를 분석하고, 아래 문제들을 해결하기 위한 수정 코드(Unified Diff 형식)를 제공해 주세요.
+
+### 해결해야 할 문제 목록
+
+**1. 유닛 저장 시 발생하는 `AttributeError` 해결 (`stingray/unit.py`)**
+- **증상**: 유닛을 저장하려고 하면 다음과 같은 오류가 발생합니다.
+  ```text
+  File "...\stingray\unit.py", line 2064, in GetMeshData
+    if (modified_bone_entry or modified_ik_skeleton or ik_skeleton_entry.IsModified) and ik_skeleton_entry:
+  AttributeError: 'NoneType' object has no attribute 'IsModified'
+
+
+그냥 유닛 저장할 떄 에러가 발생해. (새로 추가한 본 없고, 그냥 스켈레톤 ik도 없고 본 파일도 별도로 없는것들. 그리고 있는 것들도 에러남.) Python: Traceback (most recent call last): File "C:\Users\HP\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\HD2SDK-CommunityEdition_init_.py", line 2986, in execute MeshData = GetObjectsMeshData(Global_TocManager, Global_BoneNames) ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ File "C:\Users\HP\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\HD2SDK-CommunityEdition\stingray\unit.py", line 2287, in GetObjectsMeshData MeshData = GetMeshData(object, Global_TocManager, Global_BoneNames) ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ File "C:\Users\HP\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\HD2SDK-CommunityEdition\stingray\unit.py", line 2064, in GetMeshData if (modified_bone_entry or modified_ik_skeleton or ik_skeleton_entry.IsModified) and ik_skeleton_entry: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ AttributeError: 'NoneType' object has no attribute 'IsModified'
+*** 
+
+원인/힌트: ik_skeleton_entry가 None인 유닛일 경우, and 앞의 괄호 안에서 IsModified 속성을 먼저 평가하려다 발생하는 단락 평가(Short-circuit) 순서 오류입니다. 평가 순서를 수정해 주세요.
+2. ik_skeleton 저장 시 엔진 메타데이터 누락 문제 (stingray/ik_skeleton.py 및 관련 로직)
+
+증상: 유닛 저장 과정을 통해 ik_skeleton이 xml에서 hkx로 리패킹(repack)되어 저장될 때, 파일 앞부분에 위치해야 할 Stingray 엔진 메타데이터가 파일에서 누락되는 현상이 발생합니다.
+원인/힌트: 외부 배치 파일에 드래그 앤 드롭으로 처리할 때는 정상적으로 헤더가 붙지만, 애드온 내부에서 ik_skeleton.Save()를 호출하여 xml_to_hkx로 처리한 데이터를 쓸 때 PreData가 제대로 보존 및 병합되지 않거나, 캐시 파일과 관련된 로직이 빠져 있을 가능성이 높습니다. StingrayIkSkeleton.Serialize의 읽기/쓰기 로직을 검토해 주세요.
+3. 추가된 UI 기능이 노출되지 않는 문제 (__init__.py)
+
+증상: 애드온에 새로운 UI 기능과 클래스를 추가했으나, 블렌더의 N 패널(툴 패널)에 해당 기능이 보이지 않습니다.
+원인/힌트: __init__.py 파일 내의 HellDivers2ToolsPanel의 draw 메서드에 UI 렌더링 코드가 누락되었거나 특정 조건(예: 폴드아웃 변수 초기화 누락 등)에 의해 숨겨져 있을 수 있습니다. 또는 새로 만든 Operator 클래스가 classes 튜플에 등록(register)되지 않았을 수 있습니다. 코드를 확인하고 UI가 정상적으로 표출되도록 수정해 주세요.
+요구 사항
+각 문제에 대한 정확한 원인 설명과 함께, 어떤 코드를 어떻게 수정해야 하는지 파일별로 Unified Diff 형식(diff 블록)으로 작성해 주세요.
+
+plaintext
+*** 
+
+이 프롬프트를 통해 AI가 현재 컨텍스트와 문제 상황을 완벽하게 이해하고 정확한 코드 패치 방안을 제시할 수 있을 것입니다.
+
+<!--
+[PROMPT_SUGGESTION]제공해 준 프롬프트로 다른 AI가 아닌 너가 직접 위의 문제들을 수정해 줄 수 있어?[/PROMPT_SUGGESTION]
+[PROMPT_SUGGESTION]유닛 저장 시 발생하는 IsModified 에러부터 먼저 네가 해결 코드를 짜줘.[/PROMPT_SUGGESTION]
+-->

@@ -446,6 +446,27 @@ class StingrayAnimation:
         self.Serialize(output_stream)
         self.file_size = len(output_stream.Data)
 
+    # Non-serializing helpers for batch operations (used by batched workflows)
+    def add_bone_state(self, initial_state: 'AnimationBoneInitialState'):
+        """Append an AnimationBoneInitialState without serializing immediately."""
+        self.initial_bone_states.append(initial_state)
+        self.bone_count += 1
+
+    def remove_bone_index_nosave(self, bone_index: int):
+        """Remove bone by index without serializing immediately."""
+        self.initial_bone_states.pop(bone_index)
+        self.bone_count -= 1
+        self.entries = [entry for entry in self.entries if entry.bone != bone_index]
+        for entry in self.entries:
+            if entry.bone > bone_index:
+                entry.bone -= 1
+
+    def finalize_bone_changes(self):
+        """Serialize once after batch add/remove operations and update file_size."""
+        output_stream = MemoryStream(IOMode="write")
+        self.Serialize(output_stream)
+        self.file_size = len(output_stream.Data)
+
     def load_from_armature(self, context, armature, bones_data):
         #if self.is_additive_animation:
         #    raise AnimationException("Saving additive animations is not yet supported")
