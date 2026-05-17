@@ -1,4 +1,6 @@
 from math import ceil, sqrt
+from concurrent.futures import ThreadPoolExecutor
+
 import math
 
 import mathutils
@@ -1798,30 +1800,82 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
         bpy.context.view_layer.objects.active = armature_obj
         bpy.ops.object.mode_set(mode='EDIT')
         
+        bones_to_add = []
+        bones_to_remove = []
+        
         # check if animated bones list has changed, and if it has, clear all modded animations for this armature
         # but keep them in the patch
         if bone_data:
             old_bones = sorted(bone_data.BoneHashes)
             new_bones = sorted([(int(bone.name) if bone.name.isdigit() else murmur32_hash(bone.name.encode("utf-8"))) for bone in armature_obj.data.edit_bones if bone.get('Animated')])
             if old_bones != new_bones:
-                PrettyPrint("Changes made to animated bones, clearing saved animation data concurrently")
-                if state_machine_data:
-                    def _clear_animation_entry(animation_id):
-                        animation_data = Global_TocManager.GetEntry(animation_id, AnimationID, IgnorePatch=False, SearchAll=True)
-                        if Global_TocManager.IsInPatch(animation_data):
-                            Global_TocManager.RemoveEntryFromPatch(animation_id, AnimationID)
-                        Global_TocManager.AddEntryToPatch(animation_id, AnimationID)
+                if state_machine_data and state_machine_data.animation_ids:
+                    import json, sys, tempfile, subprocess, pathlib, base64, shutil
+                    PrettyPrint(f"Animated bones changed. Clearing {len(state_machine_data.animation_ids)} animation entries using parallel workers...")
 
-                    with ThreadPoolExecutor() as executor:
-                        futures = [executor.submit(_clear_animation_entry, anim) for anim in state_machine_data.animation_ids]
-                        for f in as_completed(futures):
+                    # 1. Prepare payloads for worker processes
+                    payloads = []
+                    for anim_id in state_machine_data.animation_ids:
+                        try:
+                            # This requires a new method in TocManager to get file location without loading data
+                            location_info = Global_TocManager.get_file_location(anim_id, AnimationID)
+                            if location_info:
+                                payloads.append(location_info)
+                        except Exception as e:
+                            PrettyPrint(f"Could not get file location for anim {anim_id}: {e}", "warn")
+
+                    # 2. Run worker processes
+                    results = {}
+                    if payloads:
+                        wm = bpy.context.window_manager
+                        wm.progress_begin(0, len(payloads))
+                        try:
+                            tmpdir = tempfile.mkdtemp(prefix="hd2_anim_clear_")
+                            addon_root = pathlib.Path(__file__).resolve().parents[1]
+                            script_path = addon_root / 'hd2_anim_clear_worker.py'
+                            if not script_path.exists():
+                                raise FileNotFoundError(f"Animation worker script not found at: {script_path}")
+
+                            procs = []
+                            for i, p in enumerate(payloads):
+                                in_path = pathlib.Path(tmpdir) / f"payload_{i}.json"
+                                out_path = pathlib.Path(tmpdir) / f"result_{i}.json"
+                                with open(in_path, 'w') as f: json.dump(p, f)
+                                cmd = [sys.executable, str(script_path), str(in_path), str(out_path)]
+                                procs.append((subprocess.Popen(cmd), out_path))
+
+                            for i, (proc, out_path) in enumerate(procs):
+                                proc.wait()
+                                wm.progress_update(i + 1)
+                                if proc.returncode != 0:
+                                    PrettyPrint(f"Worker for anim {payloads[i]['id']} failed.", "warn")
+                                    continue
+                                with open(out_path, 'r') as f:
+                                    res = json.load(f)
+                                    anim_id = res['id']
+                                    raw_data = base64.b64decode(res['data'])
+                                    results[anim_id] = raw_data
+
+                            shutil.rmtree(tmpdir)
+                        except Exception as e:
+                            PrettyPrint(f"Parallel animation clearing failed: {e}", "error")
+                            raise e
+                        finally:
+                            wm.progress_end()
+
+                    # 3. Apply results in main thread
+                    if results:
+                        wm = bpy.context.window_manager
+                        wm.progress_begin(0, len(results))
+                        PrettyPrint(f"Applying {len(results)} cleared animation entries...")
+                        for i, (anim_id, raw_data) in enumerate(results.items()):
+                            wm.progress_update(i + 1)
                             try:
-                                f.result()
+                                # This requires another new method in TocManager
+                                Global_TocManager.update_patch_from_raw_data(anim_id, AnimationID, raw_data)
                             except Exception as e:
-                                PrettyPrint(f"Failed to clear animation {anim}: {e}", "warn")
-
-        # Collect bone changes first to avoid loading/saving animations for every bone        bones_to_add = []
-        bones_to_remove = []
+                                PrettyPrint(f"Failed to apply cleared data for anim {anim_id}: {e}", "warn")
+                        wm.progress_end()
         for bone in armature_obj.data.edit_bones:
             try:
                 name_hash = int(bone.name)
@@ -1876,31 +1930,30 @@ def GetMeshData(og_object, Global_TocManager, Global_BoneNames):
                 print(e)
                 
             # set ragdoll
-            '''
             try:
-                bone_index = bone_data.BoneHashes.index(name_hash)
-                modified_state_machine = True
-                print(f"Setting jiggle bone for {bone.name}")
-                state_machine_data.remove_ragdoll(bone_index)
-                ragdoll = bone['Jiggle']
-                print(ragdoll)
-                weight = bone["Weight"]
-                gravity = bone["Gravity"]
-                param3 = bone["Param 3"]
-                param4 = bone["Param 4"]
-                param5 = bone["Param 5"]
-                param6 = bone["Param 6"]
-                param7 = bone["Param 7"]
-                param8 = bone["Param 8"]
-                param9 = bone["Param 9"]
-                params = [weight, gravity, param3, param4, param5, param6, param7, param8, param9]
-                if ragdoll:
-                    state_machine_data.set_ragdoll(bone_index, params)
+                if bone_data and state_machine_data and name_hash in bone_data.BoneHashes:
+                    bone_index = bone_data.BoneHashes.index(name_hash)
+                    modified_state_machine = True
+                    
+                    # Always remove first to handle toggling off
+                    state_machine_data.remove_ragdoll(bone_index)
+                    
+                    is_jiggle = bone.get('Jiggle', False)
+                    if is_jiggle:
+                        PrettyPrint(f"Setting jiggle bone for {bone.name}", "INFO")
+                        params = [
+                            bone.get("Weight", 0.0), bone.get("Gravity", -9.8),
+                            bone.get("Param 3", 0.0), bone.get("Param 4", 0.0),
+                            bone.get("Param 5", 0.0), bone.get("Param 6", 0.0),
+                            bone.get("Param 7", 0.0), bone.get("Param 8", 0.0),
+                            bone.get("Param 9", 0.0)
+                        ]
+                        state_machine_data.set_ragdoll(bone_index, params)
             except (KeyError, AttributeError) as e:
                 pass
             except ValueError as e:
+                # This can happen if the bone is not an animated bone, which is fine.
                 pass
-            '''
             
             # set bone matrix
             loc, rot, scale = bone.matrix.decompose()
@@ -2524,21 +2577,19 @@ def CreateModel(stingray_unit, id, Global_BoneNames, bones_entry, state_machine_
                     if newBone is None:
                         newBone = armature.edit_bones.new(boneName)
                         newBone.tail = 0, 0.05, 0
-                        if bones_entry: newBone['Animated'] = animated
-                        '''
-                        if bones_entry:
+                        if bones_entry: 
+                            newBone['Animated'] = animated
                             newBone['Jiggle'] = ragdoll
                             if ragdoll:
-                                newBone['Weight'] = ragdoll_params[0]
-                                newBone['Gravity'] = ragdoll_params[1]
-                                newBone['Param 3'] = ragdoll_params[2]
-                                newBone['Param 4'] = ragdoll_params[3]
-                                newBone['Param 5'] = ragdoll_params[4]
-                                newBone['Param 6'] = ragdoll_params[5]
-                                newBone['Param 7'] = ragdoll_params[6]
-                                newBone['Param 8'] = ragdoll_params[7]
-                                newBone['Param 9'] = ragdoll_params[8]
-                        '''
+                                newBone["Weight"] = ragdoll_params[0]
+                                newBone["Gravity"] = ragdoll_params[1]
+                                newBone["Param 3"] = ragdoll_params[2]
+                                newBone["Param 4"] = ragdoll_params[3]
+                                newBone["Param 5"] = ragdoll_params[4]
+                                newBone["Param 6"] = ragdoll_params[5]
+                                newBone["Param 7"] = ragdoll_params[6]
+                                newBone["Param 8"] = ragdoll_params[7]
+                                newBone["Param 9"] = ragdoll_params[8]
                         doPoseBone[newBone.name] = True
                     else:
                         doPoseBone[newBone.name] = False

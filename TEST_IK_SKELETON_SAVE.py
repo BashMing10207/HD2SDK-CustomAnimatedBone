@@ -22,19 +22,27 @@ import sys
 # Import addon context reliably from Blender
 try:
     import bpy
-    # Addons with hyphens in names are in sys.modules with hyphens
-    addon_name = 'HD2SDK-CommunityEdition'
+    # The module name is the addon's folder name.
+    addon_name = 'HD2SDK-CustomAnimatedBone'
     addon_module = sys.modules.get(addon_name)
     if not addon_module:
+        # This part is a fallback if the script is run in a weird context
+        # where the addon is not yet in sys.modules.
         import importlib
         addon_module = importlib.import_module(addon_name)
         
     Global_TocManager = addon_module.Global_TocManager
     UnitID = addon_module.UnitID
     IkSkeletonID = addon_module.IkSkeletonID
-except Exception as e:
-    print(f"Failed to load addon module: {e}")
+    
+    if Global_TocManager is None:
+        raise ImportError("Global_TocManager is None. Addon might not be initialized correctly.")
+
+except (ImportError, KeyError, AttributeError) as e:
+    print(f"❌ FAILED to import addon context: {e}")
+    print("   Please ensure the addon 'HD2SDK-CustomAnimatedBone' is installed and enabled.")
     sys.exit(1)
+
 
 print("\n" + "="*70)
 print("IK SKELETON SAVE TEST")
@@ -44,12 +52,13 @@ UNIT_ID = 5556372446766824087
 # Use absolute path for DUMMY dir based on the script location to avoid permission issues
 try:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-except NameError:
+except NameError: # __file__ is not defined when running from console
     # If running via exec() in Blender console, __file__ is not defined
     if addon_module and hasattr(addon_module, '__file__'):
         SCRIPT_DIR = os.path.dirname(os.path.abspath(addon_module.__file__))
     else:
-        SCRIPT_DIR = r"c:\Users\HP\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\HD2SDK-CommunityEdition"
+        print("❌ FAILED: Could not determine script directory. Cannot find DUMMY folder.")
+        sys.exit(1)
 DUMMY_DIR = os.path.join(SCRIPT_DIR, "DUMMY")
 
 try:
@@ -119,8 +128,8 @@ try:
     # Step 9: Save to DUMMY for inspection
     print(f"\n[Step 9] Exporting repacked hkx to DUMMY for inspection...")
     if not os.path.exists(DUMMY_DIR):
-        print(f"  ⚠ WARNING: DUMMY directory not found; attempting to use cwd")
-        DUMMY_DIR = "."
+        os.makedirs(DUMMY_DIR, exist_ok=True)
+        print(f"  ✓ DUMMY directory created at: {DUMMY_DIR}")
     outpath = os.path.join(DUMMY_DIR, "avatar_helldiver.ik_skeleton.BLENDER_SAVED.hkx")
     with open(outpath, 'wb') as f:
         f.write(repacked_hkx)

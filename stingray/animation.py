@@ -4,6 +4,7 @@ import mathutils
 
 from ..utils.logger import PrettyPrint
 from ..utils.memoryStream import MemoryStream
+from .virtual_skeleton import VirtualSkeleton
 
 class AnimationException(Exception):
     pass
@@ -417,34 +418,42 @@ class StingrayAnimation:
         tocFile.uint16(0x03)
         tocFile.uint32(size)
         
-    def remove_bone(self, bone_index):
-        self.initial_bone_states.pop(bone_index)
-        self.bone_count -= 1
-        self.entries = [entry for entry in self.entries if entry.bone != bone_index]
-        for entry in self.entries:
-            if entry.bone > bone_index:
-                entry.bone -= 1
-        output_stream = MemoryStream(IOMode="write")
-        self.Serialize(output_stream)
-        self.file_size = len(output_stream.Data)
-        
-    def add_bone(self, bone):
-        initial_state = AnimationBoneInitialState()
-        initial_state.compress_position = 0
-        initial_state.compress_rotation = 0
-        initial_state.compress_scale = 0
-        if bone.parent:
-            translation, rotation, scale = (bone.parent.matrix.inverted() @ bone.matrix).decompose()
-        else:
-            translation, rotation, scale = bone.matrix.decompose()
-        initial_state.position = translation.to_tuple()
-        initial_state.rotation = [0, 0, 0, 1]
-        initial_state.scale = [1, 1, 1] if not self.is_additive_animation else [0, 0, 0]
-        self.initial_bone_states.append(initial_state)
-        self.bone_count += 1
-        output_stream = MemoryStream(IOMode="write")
-        self.Serialize(output_stream)
-        self.file_size = len(output_stream.Data)
+    def sync_with_skeleton(self, virtual_skeleton: VirtualSkeleton):
+        """
+        Synchronizes the animation's bone count and initial states with a
+        Virtual Skeleton (SoT), adding initial pose data for new bones.
+        """
+        from ..utils.logger import PrettyPrint
+
+        old_count = self.bone_count
+        new_count = len(virtual_skeleton)
+
+        if new_count <= old_count:
+            if new_count < old_count:
+                PrettyPrint(f"Shrinking animation from {old_count} to {new_count} bones is not yet supported.", "warn")
+            return False # No changes made
+
+        PrettyPrint(f"Expanding animation from {old_count} to {new_count} bones.")
+        for i in range(old_count, new_count):
+            new_bone = virtual_skeleton[i]
+            initial_state = AnimationBoneInitialState()
+            
+            # Decompose the virtual bone's local transform matrix
+            pos, rot, scale = new_bone.transform.decompose()
+
+            initial_state.position = pos.to_tuple()
+            initial_state.rotation = (rot.x, rot.y, rot.z, rot.w) # mathutils.Quaternion is (w,x,y,z), stingray expects (x,y,z,w)
+            initial_state.scale = scale.to_tuple()
+            
+            # New bones should use uncompressed data for simplicity
+            initial_state.compress_position = False
+            initial_state.compress_rotation = False
+            initial_state.compress_scale = False
+            
+            self.add_bone_state(initial_state)
+
+        self.finalize_bone_changes()
+        return True # Changes were made
 
     # Non-serializing helpers for batch operations (used by batched workflows)
     def add_bone_state(self, initial_state: 'AnimationBoneInitialState'):
@@ -663,4 +672,3 @@ class StingrayAnimation:
         context.scene.frame_start = 0
         context.scene.render.fps = 30
         bpy.ops.object.mode_set(mode="POSE")
-

@@ -8,7 +8,7 @@ bl_info = {
 #region Imports
 
 # System
-import ctypes, os, tempfile, subprocess, time, webbrowser, shutil, datetime
+import ctypes, os, tempfile, subprocess, time, webbrowser, shutil, datetime, sys
 import random as r
 from copy import deepcopy
 import copy
@@ -27,6 +27,44 @@ import importlib
 
 #import pyautogui 
 
+# Import logger early for dependency checker
+from .utils import logger as logger_m
+from .utils.logger import PrettyPrint
+
+#region Dependency Management (Moved to top for early check)
+
+def check_and_install_dependencies():
+    """
+    Checks for required Python packages and installs them if missing.
+    """
+    required_packages = {
+        "lxml": "lxml"
+    }
+
+    for module_name, package_name in required_packages.items():
+        try:
+            importlib.import_module(module_name)
+            # PrettyPrint(f"'{package_name}' package is already installed.", "info") # Commented to reduce log spam on every Blender start
+        except ImportError:
+            PrettyPrint(f"'{package_name}' package not found. Attempting to install...", "warn")
+            try:
+                python_exe = sys.executable
+                # Ensure pip is available
+                subprocess.check_call([python_exe, "-m", "ensurepip"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Install the package
+                subprocess.check_call([python_exe, "-m", "pip", "install", package_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Verify installation by trying to import again
+                importlib.invalidate_caches()
+                importlib.import_module(module_name)
+                PrettyPrint(f"Successfully installed '{package_name}'. Please restart Blender to apply the changes.", "success")
+            except Exception as e:
+                PrettyPrint(f"Failed to install '{package_name}'. Please install it manually by running '{sys.executable} -m pip install {package_name}' in a terminal.", "error")
+                PrettyPrint(f"Error: {e}", "error")
+
+# Call dependency check immediately on addon load, before other imports
+check_and_install_dependencies()
+
 # Blender
 import bpy
 from bpy_extras.io_utils import ImportHelper, ExportHelper
@@ -43,26 +81,31 @@ from .stingray import bones as bones_m
 from .stingray import composite_unit as composite_unit_m
 from .stingray import unit as unit_m
 from .stingray import state_machine as state_machine_m
+from .stingray import ragdoll as ragdoll_m
+from .stingray import physics as physics_m
 from .utils import slim as slim_m
 from .utils import hashing as hash_m
 from .utils import memoryStream as memoryStream_m
-from .utils import logger as logger_m
 from .utils import constants as constants_m
 
-importlib.reload(constants_m)
-importlib.reload(memoryStream_m)
-importlib.reload(logger_m)
-importlib.reload(animation_m)
-importlib.reload(raw_dump_m)
-importlib.reload(material_m)
-importlib.reload(texture_m)
-importlib.reload(particle_m)
-importlib.reload(bones_m)
-importlib.reload(composite_unit_m)
-importlib.reload(unit_m)
-importlib.reload(hash_m)
-importlib.reload(slim_m)
-importlib.reload(state_machine_m)
+# Reload modules after potential dependency installation
+# This ensures modules that might have failed to import lxml initially are re-evaluated
+importlib.reload(constants_m) # Reload constants first as others might depend on it
+importlib.reload(memoryStream_m) # Reload memoryStream
+importlib.reload(logger_m) # Reload logger
+importlib.reload(animation_m) # Reload animation
+importlib.reload(raw_dump_m) # Reload raw_dump
+importlib.reload(material_m) # Reload material
+importlib.reload(texture_m) # Reload texture
+importlib.reload(particle_m) # Reload particle
+importlib.reload(bones_m) # Reload bones
+importlib.reload(composite_unit_m) # Reload composite_unit
+importlib.reload(unit_m) # Reload unit
+importlib.reload(hash_m) # Reload hashing
+importlib.reload(slim_m) # Reload slim
+importlib.reload(state_machine_m) # Reload state_machine
+importlib.reload(ragdoll_m) # Reload ragdoll
+importlib.reload(physics_m) # Reload physics
 
 from .stingray.animation import StingrayAnimation, AnimationException
 from .stingray.raw_dump import StingrayRawDump
@@ -72,13 +115,15 @@ from .stingray.particle import StingrayParticles
 from .stingray.state_machine import StingrayStateMachine
 from .stingray.bones import LoadBoneHashes, StingrayBones
 from .stingray.ik_skeleton import StingrayIkSkeleton
+from .stingray.ragdoll import StingrayRagdoll
+from .stingray.physics import StingrayPhysics
 from .stingray.composite_unit import StingrayCompositeMesh
 from .stingray.unit import CreateModel, GetObjectsMeshData, StingrayMeshFile
+from .stingray.virtual_skeleton import generate_skeleton_from_armature
+from .stingray.chain_patcher import ChainPatcher
 from .utils.slim import is_slim_version, load_package, get_package_toc, slim_init
-
 from .utils.hashing import murmur64_hash
 from .utils.memoryStream import MemoryStream
-from .utils.logger import PrettyPrint
 from .utils.constants import *
 
 #endregion
@@ -363,6 +408,7 @@ def RandomHash16():
     Global_previousRandomHash = hash
     PrettyPrint(f"Generated hash: {hash}")
     return hash
+
 #endregion
 
 #region Functions: Stingray Hashing
@@ -605,6 +651,8 @@ class TocEntry:
         if self.TypeID == BoneID: callback = LoadStingrayBones
         if self.TypeID == IkSkeletonID: callback = LoadStingrayIkSkeleton
         if self.TypeID == AnimationID: callback = LoadStingrayAnimation
+        if self.TypeID == RagdollProfileID: callback = LoadStingrayRagdoll
+        if self.TypeID == PhysicsID: callback = LoadStingrayPhysics
         if self.TypeID == StateMachineID: callback = LoadStingrayStateMachine
         if callback == None: callback = LoadStingrayDump
 
@@ -627,6 +675,8 @@ class TocEntry:
         if self.TypeID == AnimationID: callback = SaveStingrayAnimation
         if self.TypeID == BoneID: callback = SaveStingrayBones
         if self.TypeID == IkSkeletonID: callback = SaveStingrayIkSkeleton
+        if self.TypeID == RagdollProfileID: callback = SaveStingrayRagdoll
+        if self.TypeID == PhysicsID: callback = SaveStingrayPhysics
         if self.TypeID == StateMachineID: callback = SaveStingrayStateMachine
         if callback == None: callback = SaveStingrayDump
 
@@ -1723,6 +1773,26 @@ def LoadStingrayIkSkeleton(ID, TocData, GpuData, StreamData, Reload, MakeBlendOb
 
 def SaveStingrayIkSkeleton(self, ID, TocData, GpuData, StreamData, LoadedData):
     f = MemoryStream(TocData, IOMode="write") # Load in original TocData before overwriting it
+    LoadedData.Serialize(f)
+    return [f.Data, b"", b""]
+
+def LoadStingrayRagdoll(ID, TocData, GpuData, StreamData, Reload, MakeBlendObject):
+    RagdollData = StingrayRagdoll()
+    RagdollData.Serialize(MemoryStream(TocData))
+    return RagdollData
+
+def SaveStingrayRagdoll(self, ID, TocData, GpuData, StreamData, LoadedData):
+    f = MemoryStream(IOMode="write")
+    LoadedData.Serialize(f)
+    return [f.Data, b"", b""]
+
+def LoadStingrayPhysics(ID, TocData, GpuData, StreamData, Reload, MakeBlendObject):
+    PhysicsData = StingrayPhysics()
+    PhysicsData.Serialize(MemoryStream(TocData))
+    return PhysicsData
+
+def SaveStingrayPhysics(self, ID, TocData, GpuData, StreamData, LoadedData):
+    f = MemoryStream(IOMode="write")
     LoadedData.Serialize(f)
     return [f.Data, b"", b""]
 
@@ -2901,6 +2971,33 @@ class SaveStingrayUnitOperator(Operator):
         if not wasSaved:
             self.report({"ERROR"}, f"Failed to save unit {bpy.context.selected_objects[0].name}.")
             return{'CANCELLED'}
+
+        # --- CHAIN-PATCHING LOGIC ---
+        PrettyPrint("Starting chain-patching for dependent assets...", "info")
+        patch_animations_setting = context.scene.Hd2ToolPanelSettings.PatchAnimations
+        
+        armature_obj = None
+        for modifier in object.modifiers:
+            if modifier.type == "ARMATURE":
+                armature_obj = modifier.object
+                break
+        
+        if armature_obj:
+            try:
+                virtual_skeleton, name_to_index = generate_skeleton_from_armature(armature_obj)
+                if virtual_skeleton:
+                    patcher = ChainPatcher(virtual_skeleton, name_to_index, Global_TocManager, dest_id, patch_animations=patch_animations_setting)
+                    patcher.run()
+                else:
+                    PrettyPrint(f"Failed to generate virtual skeleton for armature '{armature_obj.name}'.", "error")
+            except Exception as e:
+                PrettyPrint(f"An error occurred during chain-patching for unit {dest_id}: {e}", "error")
+                import traceback
+                traceback.print_exc()
+        else:
+            PrettyPrint(f"No armature found for unit {dest_id}. Skipping chain-patching.", "warn")
+        # --- END CHAIN-PATCHING LOGIC ---
+
         self.report({'INFO'}, f"Saved Unit Object ID: {self.object_id}")
         return{'FINISHED'}
 
@@ -3009,6 +3106,38 @@ class BatchSaveStingrayUnitOperator(Operator):
                 continue
         PrettyPrint("Saving unit materials")
         SaveMeshMaterials(objects)
+
+        # --- NEW CHAIN-PATCHING LOGIC ---
+        PrettyPrint("Starting chain-patching for dependent assets...", "info")
+        patch_animations_setting = context.scene.Hd2ToolPanelSettings.PatchAnimations
+
+        processed_armatures = []
+
+        for IDitem in IDs:
+            unit_id = IDitem[0]
+            
+            armature_obj = None
+            if unit_id in objects_by_id:
+                first_mesh_obj = next(iter(objects_by_id[unit_id].values()))
+                for modifier in first_mesh_obj.modifiers:
+                    if modifier.type == "ARMATURE":
+                        armature_obj = modifier.object
+                        break
+            
+            if not armature_obj or armature_obj in processed_armatures:
+                continue
+
+            processed_armatures.append(armature_obj)
+            PrettyPrint(f"Found armature '{armature_obj.name}' for unit {unit_id}. Generating virtual skeleton...", "info")
+
+            try:
+                virtual_skeleton, name_to_index = generate_skeleton_from_armature(armature_obj)
+                if virtual_skeleton:
+                    patcher = ChainPatcher(virtual_skeleton, name_to_index, Global_TocManager, unit_id, patch_animations=patch_animations_setting)
+                    patcher.run()
+            except Exception as e:
+                PrettyPrint(f"An error occurred during chain-patching for unit {unit_id}: {e}", "error")
+
         self.report({'INFO'}, f"Saved {num_meshes}/{num_initially_selected} selected Units")
         if errors:
             self.report({'ERROR'}, f"Errors occurred while saving units. Click here to view.")
@@ -4349,7 +4478,8 @@ def LoadEntryLists():
     archive = Global_TocManager.ActiveArchive
     patch = Global_TocManager.ActivePatch
     for t in Global_TypeIDs:
-        getattr(bpy.context.scene, f"list_{t}").clear()
+        if hasattr(bpy.context.scene, f"list_{t}"):
+            getattr(bpy.context.scene, f"list_{t}").clear()
     state_machine_warning = False
     if archive and not bpy.context.scene.Hd2ToolPanelSettings.PatchOnly:
         for entry_type in archive.TocDict.keys():
@@ -4462,6 +4592,7 @@ class Hd2ToolPanelSettings(PropertyGroup):
     Force1Group          : BoolProperty(name="Force 1 Group", description = "Force mesh to only have 1 vertex group", default = True)
     AutoLods             : BoolProperty(name="Auto LODs", description = "Automatically generate LOD entries based on LOD0, does not actually reduce the quality of the mesh", default = True)
     RemoveGoreMeshes     : BoolProperty(name="Remove Gore Meshes", description = "Automatically delete all of the verticies with the gore material when loading a model", default = False)
+    PatchAnimations      : BoolProperty(name="Patch Animations", description="Automatically patch all associated animation files. Disabling this can speed up the process but may cause issues if the skeleton has changed.", default = True)
     SaveBonePositions    : BoolProperty(name="Save Animation Bone Positions", description = "Include bone positions in animation (may mess with additive animations being applied)", default = True)
     ImportArmature       : BoolProperty(name="Import Armatures", description = "Import unit armature data", default = True)
     MergeArmatures       : BoolProperty(name="Merge Armatures", description = "Merge new armatures to the selected armature", default = False)
@@ -4490,6 +4621,12 @@ class Hd2ToolPanelSettings(PropertyGroup):
     GenerateRandomTextureIDs: BoolProperty(name="Generate Random Texture IDs", description="Give a material\'s referenced textures new random IDs when said material is saved", default = True)
     OnlySaveCustomTextures:   BoolProperty(name="Save Only Custom Textures", description="Only save the labeled texture nodes on a SDK material preset", default = True)
 
+    HavokLibPath : StringProperty(
+        name="HavokLib CLI Path",
+        description="Path to the HKLib.CLI.exe for file conversion",
+        subtype='FILE_PATH'
+    )
+
     def get_settings_dict(self):
         dict = {}
         dict["MenuExpanded"] = self.MenuExpanded
@@ -4499,6 +4636,71 @@ class Hd2ToolPanelSettings(PropertyGroup):
         dict["AutoLods"] = self.AutoLods
         return dict
         
+class JigglePropertyGroup(PropertyGroup):
+    def get_jiggle(self):
+        if bpy.context.object and bpy.context.object.type == 'ARMATURE' and bpy.context.object.mode == 'EDIT' and bpy.context.active_bone:
+            return bpy.context.active_bone.get("Jiggle", False)
+        return False
+
+    def set_jiggle(self, value):
+        if bpy.context.object and bpy.context.object.type == 'ARMATURE' and bpy.context.object.mode == 'EDIT' and bpy.context.active_bone:
+            # Only call operator if value changes to prevent recursion
+            current_value = bpy.context.active_bone.get("Jiggle", False)
+            if current_value != value:
+                bpy.ops.helldiver2.set_bone_ragdoll('EXEC_DEFAULT', value=value)
+
+    jiggle_toggle: BoolProperty(
+        name="Jiggle Bone",
+        description="Enable or disable jiggle physics for the selected bone(s)",
+        get=get_jiggle,
+        set=set_jiggle
+    )
+
+    show_jiggle_params: BoolProperty(
+        name="Jiggle Parameters",
+        description="Show or hide jiggle parameters",
+        default=False
+    )
+
+class HD2_PT_BonePropertiesPanel(Panel):
+    bl_label = "Helldivers 2 Jiggle Bone"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "bone"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        # Only show in Edit Mode for an Armature with an active bone
+        return (context.object and context.object.type == 'ARMATURE' and context.object.mode == 'EDIT' and context.active_bone)
+
+    def draw(self, context):
+        layout = self.layout
+        bone = context.bone
+        jiggle_props = context.scene.hd2_jiggle_props
+
+        layout.prop(jiggle_props, "jiggle_toggle")
+
+        if bone.get("Jiggle"):
+            box = layout.box()
+            
+            row = box.row(align=True)
+            row.prop(jiggle_props, "show_jiggle_params", 
+                     icon='TRIA_DOWN' if jiggle_props.show_jiggle_params else 'TRIA_RIGHT', 
+                     icon_only=True, emboss=False)
+            row.label(text="Jiggle Parameters")
+
+            if jiggle_props.show_jiggle_params:
+                params_box = box.box()
+                col = params_box.column(align=True)
+                col.prop(bone, '["Weight"]', text="Weight")
+                col.prop(bone, '["Gravity"]', text="Gravity")
+                col.separator()
+                col.label(text="Unknown Parameters:")
+                grid = col.grid_flow(row_major=True, columns=3, align=True)
+                for i in range(3, 10):
+                    grid.prop(bone, f'["Param {i}"]', text=f"P{i}")
+
 class ListItem(PropertyGroup):
     
     item_name: StringProperty(
@@ -4811,6 +5013,7 @@ class HellDivers2ToolsPanel(Panel):
             row.prop(scene.Hd2ToolPanelSettings, "Force3UVs")
             row.prop(scene.Hd2ToolPanelSettings, "Force1Group")
             row.prop(scene.Hd2ToolPanelSettings, "AutoLods")
+            row.prop(scene.Hd2ToolPanelSettings, "PatchAnimations")
             row.prop(scene.Hd2ToolPanelSettings, "SaveBonePositions")
             row.prop(scene.Hd2ToolPanelSettings, "SaveTexturesWithMaterial")
             row.prop(scene.Hd2ToolPanelSettings, "GenerateRandomTextureIDs")
@@ -4850,6 +5053,8 @@ class HellDivers2ToolsPanel(Panel):
             row = settings_box.row()
             row.label(text=Global_gamepath)
             row.operator("helldiver2.change_filepath", icon='FILEBROWSER')
+            row = settings_box.row()
+            row.prop(scene.Hd2ToolPanelSettings, "HavokLibPath")
             settings_box.separator()
 
         if not Global_gamepathIsValid:
@@ -5431,6 +5636,8 @@ classes = (
     AddLightOperator,
     ViewChangelogOperator,
     LoadPlayerAvatarOperator,
+    JigglePropertyGroup,
+    HD2_PT_BonePropertiesPanel,
 )
 
 Global_TocManager = TocManager()
@@ -5464,6 +5671,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     Scene.Hd2ToolPanelSettings = PointerProperty(type=Hd2ToolPanelSettings)
+    Scene.hd2_jiggle_props = PointerProperty(type=JigglePropertyGroup)
     bpy.utils.register_class(WM_MT_button_context)
     bpy.types.VIEW3D_MT_object_context_menu.append(CustomPropertyContext)
     bpy.types.VIEW3D_MT_armature_context_menu.append(CustomBoneContext)
@@ -5478,6 +5686,7 @@ def register():
 
 def unregister():
     bpy.utils.unregister_class(WM_MT_button_context)
+    del Scene.hd2_jiggle_props
     del Scene.Hd2ToolPanelSettings
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

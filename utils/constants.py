@@ -14,6 +14,7 @@ AnimationID = 10600967118105529382
 StateMachineID = 11855396184103720540
 IkSkeletonID = 0x57a13425279979d7
 StringID = 979299457696010195
+RagdollProfileID = 0x1d59bd6687db6b33
 PhysicsID = 6877563742545042104
 
 Global_MaterialParentIDs = {
@@ -92,4 +93,5 @@ Global_IconDict = {
     StateMachineID: 'DRIVER',
     StringID: 'WORDWRAP_ON',
     PhysicsID: 'PHYSICS',
+    RagdollProfileID: 'PHYSICS',
 }
